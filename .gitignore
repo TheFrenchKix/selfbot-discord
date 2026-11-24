@@ -1,0 +1,21 @@
+*.lnk
+tests/__pycache__/
+*.bat
+__pycache__/
+*.pyc
+main_old.py
+gifts
+downloads/
+
+# secrets et données locales
+.env
+config.ini
+*.db
+instances/
+logs/
+tokens.json
+stocks.txt
+tickets.txt
+invites.txt
+screenshots/
+.pytest_cache/

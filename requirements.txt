@@ -1,0 +1,7 @@
+discord.py-self
+aiohttp
+beautifulsoup4
+qrcode
+web3
+websocket-client
+cryptography

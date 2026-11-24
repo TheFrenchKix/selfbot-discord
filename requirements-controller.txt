@@ -1,0 +1,3 @@
+# Environnement séparé: discord.py (bot applicatif) est incompatible avec discord.py-self.
+discord.py>=2.4
+cryptography
