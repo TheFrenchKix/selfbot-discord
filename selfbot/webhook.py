@@ -38,6 +38,7 @@ EVENTS = {
     "crashed": ("💥", "Instance crashed", "red"),
     "fatal": ("⛔", "Fatal error: not restarted", "red"),
     "stale": ("🫀", "Heartbeat lost: restarting", "orange"),
+    "renamed": ("✏️", "Instance renamed", "blue"),
     "test": ("🧪", "Webhook test", "blue"),
 }
 
@@ -72,6 +73,7 @@ def format_event(event: dict) -> dict:
         if value not in (None, ""):
             fields.append({"name": name, "value": str(value)[:1000], "inline": inline})
 
+    add("Previous name", f"`{event['old']}`" if event.get("old") else None)
     add("PID", f"`{event['pid']}`" if event.get("pid") else None)
     if "code" in event and event["code"] is not None:
         add("Exit code", f"`{event['code']}`")

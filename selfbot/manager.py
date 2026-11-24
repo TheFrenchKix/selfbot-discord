@@ -188,6 +188,28 @@ class InstanceManager:
         self.db.audit(actor, "remove", iid)
         self._emit("removed", iid, actor=actor)
 
+    def rename(self, old: str, new: str, actor: str = "owner") -> None:
+        """Renomme une instance arrêtée (coffre de tokens + dossier de données)."""
+        self._require(old)
+        self._check_id(new)
+        with self._lock:
+            inst = self.instances.get(old)
+            if inst is not None and inst.running:
+                raise ManagerError(f"Arrêtez `{old}` avant de la renommer")
+            if new in self.store.ids() or self.instance_dir(new).exists():
+                raise ManagerError(f"L'instance {new} existe déjà")
+            token = self.store.get(old)
+            if token is None:
+                raise ManagerError(f"Token illisible pour {old}")
+            src = self.instance_dir(old)
+            if src.exists():
+                src.rename(self.instance_dir(new))
+            self.store.set(new, token)
+            self.store.delete(old)
+            self.instances.pop(old, None)
+        self.db.audit(actor, "rename", f"{old} -> {new}")
+        self._emit("renamed", new, old=old, actor=actor)
+
     def _load_overrides(self, iid: str) -> dict[str, str]:
         """Réglages non secrets propres à l'instance (instances/<id>/instance.json: {"env": {...}})."""
         p = self.instance_dir(iid) / "instance.json"

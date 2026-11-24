@@ -67,6 +67,8 @@ copy config.example.ini config.ini
 | `PROXY_URL` | Proxy optionnel (`http://user:pass@host:port/`) |
 | `USER_AGENT` | Optionnel ; par défaut celui de la bibliothèque Discord |
 | `COMMAND_PREFIX` | Préfixe des commandes (défaut `.`) |
+| `SWAPZONE_API_KEY`, `FIXEDFLOAT_API_KEY`, `FIXEDFLOAT_API_SECRET` | Fournisseurs de swap (au moins un pour exécuter ; `swaprates` marche sans clé) |
+| `SWAP_PROVIDER`, `SWAP_MAX_FEE_PCT` | `auto` (meilleur devis) / `swapzone` / `fixedfloat` ; frais max acceptés vs prix du marché (défaut 3 %) |
 | `LTC_ADDRESS`, `USDT_ADDRESS` | Vos adresses de réception/envoi |
 | `MSG_CHANNEL_ID`, `VOUCH_CHANNEL_ID`, `TRANSACTION_CHANNEL_ID` | Salons de notification, vouch, transactions |
 | `IGNORED_GUILD_IDS` | Serveurs ignorés par le sniper (ids séparés par des virgules) |
@@ -141,6 +143,11 @@ Invitez le bot sur un serveur ou parlez-lui en message privé. Le préfixe est `
 | `!status <id>` | État, pid, redémarrages, âge du heartbeat |
 | `!list` | Liste toutes les instances |
 | `!remove <id>` | Arrête et supprime l'instance et son token |
+| `!rename <ancien> <nouveau>` | Renomme une instance **arrêtée** (token + dossier de données) |
+| `!logs <id> [lignes]` | Dernières lignes du log de l'instance (secrets masqués, 50 max) |
+| `!uptime` | Durée de fonctionnement du contrôleur et de chaque instance |
+| `!restartall confirm` | Redémarre toutes les instances actives |
+| `!stopall confirm` | Arrête toutes les instances |
 | `!setwebhook <url>` | Définit le webhook de logs (**en message privé uniquement**, le message est supprimé) |
 | `!webhook` | Affiche le webhook configuré (masqué) |
 | `!testwebhook` | Envoie un message de test |
@@ -201,7 +208,30 @@ Les commandes sont tapées depuis votre propre compte.
 | Crypto | `ltc`, `eur`, `usd`, `cv`, `cvt`, `crypto`, `croix`, `bal`, `mybal`, `usdtbal`, `addy`, `addyu`, `setaddy`, `setaddyu`, `tltc`, `alltx`, `lasttx`, `waittx`, `stopwaittx` |
 | Envoi de fonds | `setprivateltc`, `setprivateusdt`, `resetprivate`, `settatum`, `send`, `sendu` |
 | Serveurs / invitations | `createinvites`, `joinfromfile`, `inv`, `invs`, `invites`, `guilds`, `nuke` |
+| Shop Discord | `shop` (décorations, effets, plaques, cadres, bundles ; filtres nom/prix/Nitro/orbs, tri, pagination : `.shop help`) |
+| Infos | `ping`, `uptime`, `userinfo`, `avatar`, `banner`, `serverinfo`, `membercount`, `channelinfo`, `emojis`, `snowflake` |
+| Messages | `snipe`, `editsnipe`, `firstmsg`, `afk`, `remind`, `reminders`, `unremind`, `note` |
+| Outils | `roll`, `flip`, `choose`, `8ball`, `uuid`, `color`, `hash`, `b64`, `qr`, `time`, `weather`, `define`, `setstatus` |
+| Modération | `kick`, `ban`, `unban`, `timeout`, `slowmode` (permissions du serveur requises, actions auditées) |
+| Contrôle du sniper | `pause [1h\|off\|status]`, `stats [reset]`, `export`, `import [fichier]` (config sans secrets, dans `exports/`) |
+| Shop (suite) | `shop watch <filtres>` (nouveaux items / baisses de prix), `shop watches`, `shop unwatch <n>`, `shop compare a \| b` |
+| Crypto (suite) | `price <sym>`, `price alert\|alerts\|del`, `fees`, `watch <adresse LTC>`, `portfolio`, `gift info <code>` (sans valider le cadeau) |
+| Confort | `alias`, `snippet`, `react`, `autoreact`, `translate`, `tz`, `poll`, `copyid`, `jump`, `pins`, `purgeuser` |
+| Swap LTC ⇄ USDT | `swapltc`, `swapusdt`, `swaprates`, `swapstatus`, `autosell`, `autobuy`, `stopautosell`, `stopautobuy`, `swapauto` (`.howto swap`) |
 | Divers | `math`, `dm`, `spam`, `ppl`, `vouch`, `vpc`, `vpsc`, `weed`, `stamp`, `bingo`, `rbxgp` |
+
+### Swap LTC ⇄ USDT (Polygon)
+
+Commandes reprises de l'ancien bot (`main_ancien.py`) : `swapltc <montant|all> [adresse 0x…]`, `swapusdt <montant|all> [adresse LTC]`,
+`swapstatus`, `autosell <prix USD> <montant|all>` et `autobuy` (+ `stopautosell`, `stopautobuy`, `swapauto`).
+Il faut les clés privées (`setprivateltc`, `setprivateusdt`) et, pour exécuter, une clé API Swapzone ou FixedFloat dans `.env`.
+
+Garde-fous ajoutés : confirmation par mot de passe dans le salon de transactions, refus si le coût dépasse `SWAP_MAX_FEE_PCT`
+par rapport au prix du marché (`force=yes` pour passer outre), adresse de destination **et** adresse de dépôt renvoyée par l'API
+validées avant tout envoi, un seul swap à la fois, journal d'audit, et les automatismes s'arrêtent après le premier déclenchement.
+
+`swaprates [montant] [ltc|usdt]` compare les devis et leur coût réel sous le prix du marché, sans clé API (SideShift en lecture seule
++ vos fournisseurs configurés). Faites-le avant un gros swap : les frais varient beaucoup d'un service à l'autre.
 
 ### Envoi de crypto (`send`, `sendu`)
 

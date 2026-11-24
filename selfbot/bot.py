@@ -28,6 +28,11 @@ if sys.platform == 'win32':
             pass
 
 from litecoin import LitecoinPriceManager
+from selfbot import automation as automation_mod
+from selfbot import shop as shop_api
+from selfbot import swap as swap_mod
+from selfbot import swapcog
+from selfbot import toolkit
 from selfbot import ui
 from selfbot.config import ConfigError, load_settings, mask_token
 from selfbot.helpers import (
@@ -43,6 +48,9 @@ log = logging.getLogger("selfbot.bot")
 # Réglages: environnement (.env) + config.ini (non secret). Le token est validé au démarrage.
 SETTINGS = load_settings(require_token=False)
 register_secret(SETTINGS.token)
+for _k in (SETTINGS.api.swapzone, SETTINGS.api.fixedfloat_key, SETTINGS.api.fixedfloat_secret):
+    if _k:
+        register_secret(_k)
 if SETTINGS.proxy_url:
     register_secret(SETTINGS.proxy_url)
 STATE = InstanceState(settings=SETTINGS)
@@ -53,6 +61,8 @@ def _db() -> Database:
     if STATE.db is None:
         STATE.db = Database(SETTINGS.data_dir / "selfbot.db")
     return STATE.db
+
+STATS = toolkit.Stats(lambda: _db())
 
 # Variables
 stockSniper             = True
@@ -187,6 +197,21 @@ patch_parse_ready_supplemental()
 
 # Create the bot object with self_bot=True
 class SelfBot(commands.Bot):
+    async def setup_hook(self):
+        """Charge le cog de commandes utilitaires (selfbot/extras.py)."""
+        from selfbot import extras
+        await extras.setup(self, lambda: STATE.db, PREFIX)
+        await automation_mod.setup(self, _automation_bridge(), lambda: _db())
+        await swapcog.setup(self, _swap_bridge(), lambda: _db(), PREFIX)
+
+    async def process_commands(self, message):
+        """Expanse les alias personnels (`alias add`) pour nos propres messages."""
+        if message.content and self.user is not None and message.author.id == self.user.id:
+            cog = self.get_cog("Automation")
+            if cog is not None:
+                message.content = cog.expand(message.content)
+        await super().process_commands(message)
+
     async def close(self):
         """Arrêt propre: annule les tâches de fond suivies, ferme sessions HTTP/DB."""
         try:
@@ -458,6 +483,7 @@ async def _process_stock_async(message, price, quantity, url, price_value):
     global stockAuthor, stockGuild, startTime, ticketTime
 
     try:
+        STATS.record("snipes", message.channel.id, time.time() - message.created_at.timestamp())
         if not url:
             # Find ticket using the guild_ticket_map
             ticketChannel = await foundticket(message.guild.id)
@@ -466,6 +492,7 @@ async def _process_stock_async(message, price, quantity, url, price_value):
                 # TICKET FOUND - AUTO BUY LOGIC
                 if autoBuy and message.channel.id in snipeChannels and price_value <= float(maxprice):
                     startTime = time.time()
+                    STATS.record("autobuys", message.channel.id)
 
                     if snipeDelay:
                         await asyncio.sleep(snipeDelay)
@@ -489,6 +516,7 @@ async def _process_stock_async(message, price, quantity, url, price_value):
                 # NO TICKET FOUND
                 if autoBuy and message.channel.id in snipeChannels and price_value <= float(maxprice):
                     startTime = time.time()
+                    STATS.record("autobuys", message.channel.id)
                     if snipeDelay:
                         await asyncio.sleep(snipeDelay)
                     spawn(send_dm(message.author, f"{message.author.mention}"))
@@ -713,6 +741,36 @@ HELP_TOPICS = {
         ("Network", "`{p}proxyinfo` · `{p}proxytest`"),
         ("Keys (memory only)", "`{p}settatum <key>` · `{p}settoken [token]`. Put permanent values in `.env`."),
     ]),
+    "shop": ("🛍️", "Discord shop", [
+        ("Browse", "`{p}shop [type] [name] [options]` · types: deco, effect, nameplate, frame, bundle, all"),
+        ("Filters", "`min=` `max=` price · `nitro=yes` Nitro discount · `orbs=yes` buyable with orbs · `exclusive=yes`"),
+        ("Sort / pages", "`sort=popular|new|old|price|nitro|orbs|name` · `order=desc` · `limit=` · `page=` · `country=FR` · `scan=`"),
+        ("Examples", "`{p}shop deco max=7 sort=price` · `{p}shop venom` · `{p}shop bundle nitro=yes`"),
+    ]),
+    "tools": ("🧪", "Info & tools", [
+        ("Info", "`{p}ping` · `{p}uptime` · `{p}userinfo [user]` · `{p}avatar [user]` · `{p}banner [user]` · `{p}serverinfo` · `{p}membercount` · `{p}channelinfo` · `{p}emojis` · `{p}snowflake <id>`"),
+        ("Messages", "`{p}snipe [n]` last deleted · `{p}editsnipe [n]` last edited · `{p}firstmsg` first message of the channel"),
+        ("Productivity", "`{p}afk [reason|off]` auto-reply · `{p}remind <1h30m> <text>` · `{p}reminders` · `{p}unremind <n>` · `{p}note add|list|del`"),
+        ("Tools", "`{p}roll 2d6+1` · `{p}flip` · `{p}choose a | b` · `{p}8ball` · `{p}uuid` · `{p}color <hex>` · `{p}hash <algo> <text>` · `{p}b64 encode|decode <text>` · `{p}qr <text>`"),
+        ("Web", "`{p}time <Europe/Paris>` · `{p}weather <city>` (wttr.in) · `{p}define <word>` (dictionaryapi.dev)"),
+        ("Profile", "`{p}setstatus online|idle|dnd|invisible`"),
+        ("Moderation", "`{p}kick <user>` · `{p}ban <id>` · `{p}unban <id>` · `{p}timeout <user> <1h|0>` · `{p}slowmode <s>` (needs server permissions)"),
+    ]),
+    "automation": ("⚡", "Automation", [
+        ("Sniper control", "`{p}pause [1h|off|status]` pauses sniper + auto-buy + redeemer · `{p}stats [reset]` · `{p}export` / `{p}import [file]` config backup (no secrets)"),
+        ("Shop", "`{p}shop watch <filters>` alerts on new items / price drops · `{p}shop watches` · `{p}shop unwatch <n>` · `{p}shop compare a | b`"),
+        ("Gift", "`{p}gift info <code>` checks a Nitro gift without redeeming it"),
+        ("Crypto", "`{p}price <sym>` · `{p}price alert <sym> above|below <€>` · `{p}price alerts` · `{p}price del <n>` · `{p}fees` · `{p}watch <ltc address>` · `{p}portfolio`"),
+        ("Shortcuts", "`{p}alias add|list|del` · `{p}snippet add|list|del|<name>` · `{p}react <emoji>` · `{p}autoreact add|list|del|on|off`"),
+        ("Misc", "`{p}translate <lang> <text>` · `{p}tz set|list|del|<user>` · `{p}poll q | a | b` · `{p}copyid` · `{p}jump <id>` · `{p}pins` · `{p}purgeuser <user> [n]`"),
+    ]),
+    "swap": ("💱", "Swap LTC ⇄ USDT", [
+        ("Swap", "`{p}swapltc <amount|all> [0x address]` LTC → USDT (Polygon) · `{p}swapusdt <amount|all> [ltc address]` USDT → LTC · confirm with your password in the transaction channel"),
+        ("Compare fees", "`{p}swaprates [amount] [ltc|usdt]` compares providers and their cost vs the market price (no API key needed)"),
+        ("Follow up", "`{p}swapstatus <order id>` (Swapzone) · `{p}swapstatus <id> <token>` (FixedFloat)"),
+        ("Automatic", "`{p}autosell <usd> <amount|all>` sells LTC once the price passes the threshold then dips · `{p}autobuy <usd> <amount|all>` buys back · `{p}stopautosell` · `{p}stopautobuy` · `{p}swapauto`"),
+        ("Safety", "Refuses a swap costing more than SWAP_MAX_FEE_PCT vs market (override: `force=yes`), validates both addresses, one swap at a time."),
+    ]),
     "utility": ("🧰", "Utilities", [
         ("Tools", "`{p}math <expr>` · `{p}dm <user> <text>` · `{p}spam <n> <text>` · `{p}stamp [date]` · `{p}rbxgp <url[_url…]>` · `{p}bingo`"),
         ("Moderation", "`{p}nuke [n]` delete your last messages · `{p}guilds` monitored servers"),
@@ -745,6 +803,46 @@ async def howto(ctx, *, topic: str = None):
     await ctx.message.edit(pages[0])
     for page in pages[1:]:
         await ctx.send(page)
+
+@client.command()
+async def shop(ctx, *, args: str = ""):
+    """Browse the Discord shop (decorations, effects, nameplates, frames, bundles)."""
+    if args.strip().lower() in ("help", "?"):
+        await ctx.message.edit(ui.card("Discord shop", icon="🛍️", desc=shop_api.usage(PREFIX), level=2))
+        return
+    extra = client.get_cog("Automation")
+    if extra is not None and await extra.shop_extra(ctx, args):
+        return
+    try:
+        q = shop_api.parse_query(args)
+    except shop_api.ShopError as e:
+        await ctx.message.edit(ui.err(str(e), f"`{PREFIX}shop help` for usage"))
+        return
+
+    await ctx.message.edit(ui.wait("Loading the Discord shop…"))
+    try:
+        async with aiohttp.ClientSession() as session:
+            items = await shop_api.fetch_items(session, TOKEN, q)
+    except (shop_api.ShopError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+        await ctx.message.edit(ui.err("Could not load the shop", str(e) or type(e).__name__))
+        return
+
+    found = shop_api.apply_filters(items, q)
+    if not found:
+        await ctx.message.edit(ui.warn("No shop item matches", f"{len(items)} items scanned · try `scan=` or looser filters"))
+        return
+    page_items, pages = shop_api.paginate(found, q.page, q.limit)
+    page = min(q.page, pages)
+    label = shop_api.TYPES[q.kind][1] + "s" if q.kind in shop_api.TYPES else "Items"
+    title = f"{label}" + (f" · “{q.name}”" if q.name else "")
+    body = ui.card(title, icon="🛍️", desc="\n".join(shop_api.format_item(i) for i in page_items),
+                   footer=f"{len(found)} result(s) of {len(items)} scanned · page {page}/{pages} · "
+                          f"{q.country} · sort {q.sort}")
+    pages_out = ui.chunk(body)
+    await ctx.message.edit(pages_out[0])
+    for extra in pages_out[1:]:
+        await ctx.send(extra)
+
 
 async def getcategory(category):
     """
@@ -4581,6 +4679,89 @@ def printdebug(message: str, level: str = "INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     print(f"{color}[{timestamp}] [{level}] {message}{colors['RESET']}")
+
+def _get_flags() -> dict:
+    return {"stockSniper": stockSniper, "autoBuy": autoBuy, "autoRedeem": autoRedeem}
+
+
+def _set_flags(**kw) -> None:
+    global stockSniper, autoBuy, autoRedeem
+    stockSniper = kw.get("stockSniper", stockSniper)
+    autoBuy = kw.get("autoBuy", autoBuy)
+    autoRedeem = kw.get("autoRedeem", autoRedeem)
+
+
+def _export_config() -> dict:
+    """Réglages exportables (jamais de token, clé API, adresse ou clé privée)."""
+    return {
+        "stock_channels": sorted(stocksChannels), "snipe_channels": sorted(snipeChannels),
+        "ticket_channels": sorted(ticketChannels), "keywords": sorted(keywords),
+        "exclude_keywords": sorted(excludeKeywords), "labels_check": sorted(labelsCheck),
+        "max_price": maxprice if isinstance(maxprice, (int, float)) else float(maxprice),
+        "auto_mode": autoMode, "snipe_delay": snipeDelay,
+    }
+
+
+def _import_config(c: dict) -> None:
+    """Applique un export déjà validé (toolkit.validate_config) et le persiste."""
+    global keywords, excludeKeywords, labelsCheck, maxprice, autoMode, snipeDelay
+    db = _db()
+    keywords, excludeKeywords, labelsCheck = set(c["keywords"]), set(c["exclude_keywords"]), set(c["labels_check"])
+    db.set("keywords", sorted(keywords))
+    db.set("excludeKeywords", sorted(excludeKeywords))
+    db.set("labelsCheck", sorted(labelsCheck))
+    for table, key, fname in ((stocksChannels, "stock_channels", "stocks.txt"), (ticketChannels, "ticket_channels", "tickets.txt")):
+        table.clear()
+        table.update(c[key])
+        table_to_file(fname, table)
+    snipeChannels.clear()
+    snipeChannels.update(c["snipe_channels"])
+    if c.get("max_price") is not None:
+        maxprice = c["max_price"]
+    if c.get("auto_mode"):
+        autoMode = c["auto_mode"]
+    snipeDelay = c.get("snipe_delay")
+
+
+async def _swap_balance(coin: str):
+    """Solde LTC / USDT (None si indisponible)."""
+    if coin == "ltc":
+        bal = await get_ltc_balance(ltc_address)
+        return bal["balance"] / 1e8 if bal and "balance" in bal else None
+    bal = await get_bal_usdt(usdt_address)
+    return float(bal["balance"]) if bal and "balance" in bal else None
+
+
+async def _swap_price(coin_id: str):
+    price = await get_crypto_info(coin_id, "usd")
+    return price if isinstance(price, (int, float)) and price > 0 else None
+
+
+async def _swap_send(coin: str, deposit: str, amount: float):
+    if coin == "ltc":
+        return await send_ltc(ltc_address, deposit, amount)
+    return await send_usdt_matic(deposit, amount, usdtprivate)
+
+
+def _swap_bridge():
+    api = SETTINGS.api
+    return swapcog.SwapBridge(
+        ltc_address=lambda: ltc_address, usdt_address=lambda: usdt_address, privatepass=lambda: privatepass,
+        has_key=lambda coin: bool(ltcprivate if coin == "ltc" else usdtprivate),
+        transaction_channel=lambda: transactionChannel, send_funds=_swap_send, balance=_swap_balance,
+        price_usd=_swap_price, providers=lambda: swap_mod.build_providers(api.swapzone, api.fixedfloat_key, api.fixedfloat_secret),
+        provider_pref=lambda: SETTINGS.swap_provider, max_fee=lambda: SETTINGS.swap_max_fee, send_message=send_message,
+    )
+
+
+def _automation_bridge():
+    return automation_mod.Bridge(
+        token=lambda: TOKEN, prefix=PREFIX, data_dir=SETTINGS.data_dir,
+        get_flags=_get_flags, set_flags=_set_flags, export_config=_export_config, import_config=_import_config,
+        stats=STATS, ltc_address=lambda: ltc_address, usdt_address=lambda: usdt_address,
+        get_ltc_balance=get_ltc_balance, get_usdt_balance=get_bal_usdt, last_transactions=last_transactions,
+    )
+
 
 def run_bot():
     """Valide la configuration puis lance le client. Erreur explicite si le token manque."""

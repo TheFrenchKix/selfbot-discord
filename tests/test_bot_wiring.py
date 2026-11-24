@@ -82,7 +82,9 @@ def test_help_pages_fit_in_discord_messages(bot):
 
 
 def test_help_documents_only_existing_commands(bot):
+    import asyncio
     import re
+    asyncio.run(bot.client.setup_hook())      # charge le cog selfbot/extras.py
     names = {c.name for c in bot.client.commands}
     for key in bot.HELP_TOPICS:
         for cmd in re.findall(r"`\{p\}(\w+)", " ".join(t for _, ts in [(0, [x[1] for x in bot.HELP_TOPICS[key][2]])] for t in ts)):

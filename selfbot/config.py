@@ -100,6 +100,9 @@ class ApiKeys:
     exchangerate: str = ""
     tatum: str = ""
     blockcypher: str = ""
+    swapzone: str = ""
+    fixedfloat_key: str = ""
+    fixedfloat_secret: str = ""
 
 
 @dataclass
@@ -133,6 +136,8 @@ class Settings:
     instance_id: str = "default"
     data_dir: Path = Path(".")
     debug: bool = False
+    swap_provider: str = "auto"          # auto | swapzone | fixedfloat
+    swap_max_fee: float = 3.0            # % maximum sous le prix du marché
 
     # -- validation -------------------------------------------------------- #
     def validate(self, require_token: bool = True) -> "Settings":
@@ -143,6 +148,10 @@ class Settings:
             problems.append("PROXY_URL doit commencer par http://, https:// ou socks5://")
         if self.filters.max_price < 0:
             problems.append("MAX_PRICE doit être positif")
+        if self.swap_provider not in ("auto", "swapzone", "fixedfloat"):
+            problems.append("SWAP_PROVIDER doit valoir auto, swapzone ou fixedfloat")
+        if not 0 < self.swap_max_fee <= 50:
+            problems.append("SWAP_MAX_FEE_PCT doit être compris entre 0 et 50")
         if problems:
             raise ConfigError("Configuration invalide:\n  - " + "\n  - ".join(problems))
         return self
@@ -197,6 +206,9 @@ def load_settings(
             exchangerate=env.get("EXCHANGERATE_API_KEY", ""),
             tatum=env.get("TATUM_API_KEY", ""),
             blockcypher=env.get("BLOCKCYPHER_TOKEN", ""),
+            swapzone=env.get("SWAPZONE_API_KEY", ""),
+            fixedfloat_key=env.get("FIXEDFLOAT_API_KEY", ""),
+            fixedfloat_secret=env.get("FIXEDFLOAT_API_SECRET", ""),
         ),
         channels=Channels(
             message=_to_int(env.get("MSG_CHANNEL_ID"), "MSG_CHANNEL_ID", 0) or 0,
@@ -219,6 +231,8 @@ def load_settings(
         instance_id=env.get("INSTANCE_ID", "default").strip() or "default",
         data_dir=Path(env.get("DATA_DIR", ".")),
         debug=env.get("DEBUG", "").strip().lower() in ("1", "true", "yes", "on"),
+        swap_provider=(env.get("SWAP_PROVIDER", "auto").strip().lower() or "auto"),
+        swap_max_fee=_to_float(env.get("SWAP_MAX_FEE_PCT"), "SWAP_MAX_FEE_PCT", 3.0),
     )
     return settings.validate(require_token=require_token)
 

@@ -13,12 +13,14 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
 from .config import load_dotenv, mask_token
 from .logging_setup import register_secret, setup_logging
 from .manager import InstanceManager, ManagerError
+from .tools import fmt_duration
 from .webhook import WebhookError, WebhookNotifier
 
 log = logging.getLogger("selfbot.controller")
@@ -32,6 +34,7 @@ class ControllerService:
         self.manager = manager
         self.owner_ids = {int(i) for i in owner_ids}
         self.notifier = notifier
+        self.started = time.time()
         if notifier is not None:
             manager.add_listener(notifier.notify)
 
@@ -108,6 +111,47 @@ class ControllerService:
         self._guard(actor_id)
         return self._fmt(self.manager.status(iid))
 
+    def rename(self, actor_id: int, old: str, new: str) -> str:
+        self.manager.rename(old, new, actor=self._guard(actor_id))
+        return f"✏️ `{old}` renommée en `{new}`"
+
+    def logs(self, actor_id: int, iid: str, lines: int = 15) -> str:
+        """Dernières lignes du log d'une instance (secrets masqués)."""
+        self._guard(actor_id)
+        self.manager._require(iid)
+        text = self.manager.log_tail(iid, lines=max(1, min(int(lines), 50)), max_chars=1700)
+        if not text:
+            return f"ℹ️ Aucun log pour `{iid}`"
+        return f"📜 `{iid}`\n```\n{text.replace('```', chr(39) * 3)}\n```"
+
+    def uptime(self, actor_id: int) -> str:
+        self._guard(actor_id)
+        rows = [f"🛰️ Contrôleur · {fmt_duration(time.time() - self.started)}"]
+        for st in self.manager.list():
+            up = fmt_duration(st["uptime"]) if st["state"] == "running" else "—"
+            rows.append(f"`{st['id']}` · {st['state']} · uptime {up} · restarts {st['restarts']}")
+        return "\n".join(rows)
+
+    def stopall(self, actor_id: int) -> str:
+        actor = self._guard(actor_id)
+        stopped = [st["id"] for st in self.manager.list() if self.manager.stop(st["id"], actor=actor)]
+        return f"⏹️ {len(stopped)} instance(s) arrêtée(s)" + (": " + ", ".join(f"`{i}`" for i in stopped) if stopped else "")
+
+    def restartall(self, actor_id: int) -> str:
+        """Redémarre les instances qui tournent (ou qui devraient tourner)."""
+        actor = self._guard(actor_id)
+        done, failed = [], []
+        for st in self.manager.list():
+            if st["state"] == "stopped":
+                continue
+            try:
+                self.manager.restart(st["id"], actor=actor)
+                done.append(st["id"])
+            except ManagerError as exc:
+                failed.append(f"`{st['id']}` ({exc})")
+        out = f"🔄 {len(done)} instance(s) redémarrée(s)" + (": " + ", ".join(f"`{i}`" for i in done) if done else "")
+        return out + (f"\n⚠️ Échecs: {'; '.join(failed)}" if failed else "")
+
     def list(self, actor_id: int) -> str:
         self._guard(actor_id)
         rows = self.manager.list()
@@ -176,6 +220,36 @@ def build_bot(service: ControllerService):
     @owner_cmd("list")
     async def list_(ctx):
         await reply(ctx, service.list)
+
+    @owner_cmd("rename")
+    async def rename(ctx, old: str, new: str):
+        """!rename <ancien> <nouveau> (instance arrêtée)"""
+        await reply(ctx, service.rename, old, new)
+
+    @owner_cmd("logs")
+    async def logs(ctx, instance_id: str, lines: int = 15):
+        """!logs <id> [lignes] : dernières lignes du log (secrets masqués)"""
+        await reply(ctx, service.logs, instance_id, lines)
+
+    @owner_cmd("uptime")
+    async def uptime(ctx):
+        await reply(ctx, service.uptime)
+
+    @owner_cmd("stopall")
+    async def stopall(ctx, confirm: str = ""):
+        """!stopall confirm : arrête toutes les instances"""
+        if confirm.lower() != "confirm":
+            await ctx.send("⚠️ Arrête **toutes** les instances. Confirmez avec `!stopall confirm`")
+            return
+        await reply(ctx, service.stopall)
+
+    @owner_cmd("restartall")
+    async def restartall(ctx, confirm: str = ""):
+        """!restartall confirm : redémarre toutes les instances actives"""
+        if confirm.lower() != "confirm":
+            await ctx.send("⚠️ Redémarre **toutes** les instances actives. Confirmez avec `!restartall confirm`")
+            return
+        await reply(ctx, service.restartall)
 
     @owner_cmd("setwebhook")
     @commands.dm_only()

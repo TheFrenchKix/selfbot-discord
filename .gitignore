@@ -19,3 +19,9 @@ tickets.txt
 invites.txt
 screenshots/
 .pytest_cache/
+
+# captures réseau (contiennent des en-têtes / cookies)
+*.har
+
+exports/
+main_ancien.py

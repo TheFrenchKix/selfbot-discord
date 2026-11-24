@@ -5,3 +5,5 @@ qrcode
 web3
 websocket-client
 cryptography
+
+tzdata
