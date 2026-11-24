@@ -14,11 +14,12 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 from .config import load_dotenv, mask_token
 from .logging_setup import register_secret, setup_logging
 from .manager import InstanceManager, ManagerError
+from .webhook import WebhookError, WebhookNotifier
 
 log = logging.getLogger("selfbot.controller")
 
@@ -26,9 +27,48 @@ log = logging.getLogger("selfbot.controller")
 class ControllerService:
     """Logique des commandes, indépendante de Discord (testable)."""
 
-    def __init__(self, manager: InstanceManager, owner_ids: Iterable[int]):
+    def __init__(self, manager: InstanceManager, owner_ids: Iterable[int],
+                 notifier: Optional[WebhookNotifier] = None):
         self.manager = manager
         self.owner_ids = {int(i) for i in owner_ids}
+        self.notifier = notifier
+        if notifier is not None:
+            manager.add_listener(notifier.notify)
+
+    def _notifier(self) -> WebhookNotifier:
+        if self.notifier is None:
+            raise ManagerError("Webhook non disponible")
+        return self.notifier
+
+    def setwebhook(self, actor_id: int, url: str) -> str:
+        actor = self._guard(actor_id)
+        try:
+            masked = self._notifier().set_url(url)
+        except WebhookError as exc:
+            raise ManagerError(str(exc)) from exc
+        self.manager.db.audit(actor, "setwebhook", masked)
+        return f"✅ Webhook de logs enregistré (`{masked}`). Utilisez `testwebhook` pour vérifier."
+
+    def clearwebhook(self, actor_id: int) -> str:
+        actor = self._guard(actor_id)
+        had = self._notifier().clear()
+        self.manager.db.audit(actor, "clearwebhook", "")
+        return "🗑️ Webhook supprimé" if had else "ℹ️ Aucun webhook n'était configuré"
+
+    def webhook(self, actor_id: int) -> str:
+        self._guard(actor_id)
+        n = self._notifier()
+        return f"🔔 Webhook: `{n.masked}`" if n.configured else "🔕 Aucun webhook configuré (`setwebhook <url>`)"
+
+    async def testwebhook(self, actor_id: int) -> str:
+        actor = self._guard(actor_id)
+        n = self._notifier()
+        try:
+            ok = await n.send_test()
+        except WebhookError as exc:
+            raise ManagerError(str(exc)) from exc
+        self.manager.db.audit(actor, "testwebhook", "ok" if ok else "failed")
+        return "✅ Message de test envoyé" if ok else "❌ Échec de l'envoi (voir les logs du contrôleur)"
 
     def is_owner(self, user_id: int) -> bool:
         return int(user_id) in self.owner_ids
@@ -137,6 +177,33 @@ def build_bot(service: ControllerService):
     async def list_(ctx):
         await reply(ctx, service.list)
 
+    @owner_cmd("setwebhook")
+    @commands.dm_only()
+    async def setwebhook(ctx, url: str):
+        """!setwebhook <url> : webhook où envoyer les logs des instances (en message privé)"""
+        register_secret(url)
+        try:
+            await ctx.message.delete()
+        except discord.HTTPException:
+            pass
+        await reply(ctx, service.setwebhook, url)
+
+    @owner_cmd("clearwebhook")
+    async def clearwebhook(ctx):
+        await reply(ctx, service.clearwebhook)
+
+    @owner_cmd("webhook")
+    async def webhook(ctx):
+        await reply(ctx, service.webhook)
+
+    @owner_cmd("testwebhook")
+    async def testwebhook(ctx):
+        try:
+            text = await service.testwebhook(ctx.author.id)
+        except ManagerError as exc:
+            text = f"❌ {exc}"
+        await ctx.send(text[:1900])
+
     @bot.event
     async def on_command_error(ctx, error):
         if isinstance(error, commands.CommandNotFound):
@@ -155,10 +222,14 @@ def build_bot(service: ControllerService):
     @bot.event
     async def on_ready():
         log.info("Contrôleur connecté en tant que %s", bot.user)
+        if service.notifier is not None:
+            service.notifier.start()
         service.manager.start_monitor()
 
     async def close_hook():
         await service.manager.shutdown()
+        if service.notifier is not None:
+            await service.notifier.close()
 
     original_close = bot.close
 
@@ -185,7 +256,14 @@ def main() -> int:
 
     setup_logging("controller", Path("logs"), secrets=[token])
     manager = InstanceManager(root=os.environ.get("INSTANCES_DIR", "instances"))
-    service = ControllerService(manager, owners)
+    notifier = WebhookNotifier(manager.root / "webhook.json")
+    env_url = os.environ.get("LOG_WEBHOOK_URL", "").strip()
+    if env_url and not notifier.configured:
+        try:
+            notifier.set_url(env_url)
+        except WebhookError as exc:
+            log.error("LOG_WEBHOOK_URL ignorée: %s", exc)
+    service = ControllerService(manager, owners, notifier)
     try:
         bot = build_bot(service)
     except ImportError:

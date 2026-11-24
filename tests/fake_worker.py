@@ -35,6 +35,9 @@ for name in ("SIGTERM", "SIGINT", "SIGBREAK"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), _stop)
 
+if os.environ.get("FAKE_PRINT"):
+    print("boom: token=" + os.environ.get("DISCORD_TOKEN", ""), flush=True)
+
 if os.environ.get("FAKE_EXIT"):
     time.sleep(0.3)
     hb.stop()

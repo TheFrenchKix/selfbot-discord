@@ -141,8 +141,27 @@ Invitez le bot sur un serveur ou parlez-lui en message privé. Le préfixe est `
 | `!status <id>` | État, pid, redémarrages, âge du heartbeat |
 | `!list` | Liste toutes les instances |
 | `!remove <id>` | Arrête et supprime l'instance et son token |
+| `!setwebhook <url>` | Définit le webhook de logs (**en message privé uniquement**, le message est supprimé) |
+| `!webhook` | Affiche le webhook configuré (masqué) |
+| `!testwebhook` | Envoie un message de test |
+| `!clearwebhook` | Supprime le webhook |
 
 `<id>` : 1 à 32 caractères (lettres, chiffres, `_`, `-`).
+
+### Logs des instances par webhook
+
+Créez un webhook dans un salon (Paramètres du salon → Intégrations → Webhooks), puis, en message privé au
+contrôleur : `!setwebhook https://discord.com/api/webhooks/<id>/<token>`. Vous pouvez aussi définir
+`LOG_WEBHOOK_URL` dans `.env` (utilisée seulement si aucun webhook n'est déjà enregistré).
+
+Un embed est envoyé pour chaque événement : instance ajoutée, supprimée, **démarrée**, **redémarrée**,
+**arrêtée**, **relancée après un crash**, **crash** (code de sortie, uptime, délai avant relance et dernières lignes
+de log), **erreur fatale** (token invalide, non relancée) et **heartbeat perdu**. Les secrets sont masqués dans les
+extraits de log.
+
+L'URL du webhook est un secret : elle est stockée chiffrée (`instances/webhook.json`), validée (domaine Discord
+uniquement) et toujours affichée masquée. Les envois sont asynchrones, relancés en cas de 429 / erreur réseau, et
+n'ont jamais d'effet sur la supervision.
 
 ### Réglages propres à une instance
 
@@ -229,6 +248,7 @@ selfbot/
   worker.py              processus d'une instance (heartbeat, arrêt gracieux)
   manager.py             supervision des workers (backoff, rate limit, audit)
   controller.py          bot applicatif de contrôle
+  webhook.py             notifications des instances vers un webhook Discord
 tests/                   suite pytest
 ```
 

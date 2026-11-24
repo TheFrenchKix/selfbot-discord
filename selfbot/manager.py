@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from .config import mask_token
-from .logging_setup import register_secret
+from .logging_setup import redact, register_secret
 from .secrets import SecretsError, TokenStore
 from .storage.db import Database
 
@@ -107,6 +107,34 @@ class InstanceManager:
         self.instances: dict[str, Instance] = {}
         self._lock = threading.RLock()
         self._monitor_task: Optional[asyncio.Task] = None
+        self.listeners: list[Callable[[dict], None]] = []
+
+    # ------------------------------------------------------------------ #
+    # événements (démarrage, arrêt, crash...) pour les notifications
+    # ------------------------------------------------------------------ #
+    def add_listener(self, callback: Callable[[dict], None]) -> None:
+        """``callback(event)`` doit être rapide et non bloquant (peut être appelé depuis un thread)."""
+        self.listeners.append(callback)
+
+    def _emit(self, type_: str, iid: str, **data) -> None:
+        event = {"type": type_, "instance": iid, "ts": time.time(), **data}
+        for cb in list(self.listeners):
+            try:
+                cb(event)
+            except Exception:  # un listener défaillant ne doit jamais casser la supervision
+                log.exception("Listener d'événement en échec")
+
+    def log_tail(self, iid: str, lines: int = 8, max_chars: int = 900) -> str:
+        """Dernières lignes du log du worker, secrets masqués."""
+        try:
+            with open(self.log_path(iid), "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 8192))
+                text = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
+        tail = "\n".join(text.strip().splitlines()[-lines:])
+        return redact(tail)[-max_chars:]
 
     # ------------------------------------------------------------------ #
     # chemins
@@ -147,16 +175,18 @@ class InstanceManager:
         self.store.set(iid, token)
         self.instance_dir(iid).mkdir(parents=True, exist_ok=True)
         self.db.audit(actor, "addtoken", f"{iid} {mask_token(token)}")
+        self._emit("added", iid, actor=actor)
         log.info("Instance %s ajoutée (%s) par %s", iid, mask_token(token), actor)
         return mask_token(token)
 
     def remove(self, iid: str, actor: str = "owner") -> None:
         self._require(iid)
-        self.stop(iid, actor=actor, _audit=False)
+        self.stop(iid, actor=actor, _audit=False, _emit=False)
         self.store.delete(iid)
         with self._lock:
             self.instances.pop(iid, None)
         self.db.audit(actor, "remove", iid)
+        self._emit("removed", iid, actor=actor)
 
     def _load_overrides(self, iid: str) -> dict[str, str]:
         """Réglages non secrets propres à l'instance (instances/<id>/instance.json: {"env": {...}})."""
@@ -183,7 +213,7 @@ class InstanceManager:
     # ------------------------------------------------------------------ #
     # cycle de vie
     # ------------------------------------------------------------------ #
-    def start(self, iid: str, actor: str = "owner", _count_rate: bool = True) -> int:
+    def start(self, iid: str, actor: str = "owner", _count_rate: bool = True, _event: Optional[str] = "started") -> int:
         self._require(iid)
         with self._lock:
             inst = self.instances.setdefault(iid, Instance(iid))
@@ -216,9 +246,11 @@ class InstanceManager:
             inst.last_exit = None
             self.db.audit(actor, "start", f"{iid} pid={proc.pid}")
             log.info("Instance %s démarrée (pid %s)", iid, proc.pid)
+            if _event:
+                self._emit(_event, iid, actor=actor, pid=proc.pid, restarts=inst.restarts)
             return proc.pid
 
-    def stop(self, iid: str, actor: str = "owner", timeout: float = 10.0, _audit: bool = True) -> bool:
+    def stop(self, iid: str, actor: str = "owner", timeout: float = 10.0, _audit: bool = True, _emit: bool = True) -> bool:
         self._check_id(iid)
         with self._lock:
             inst = self.instances.get(iid)
@@ -228,8 +260,11 @@ class InstanceManager:
             proc = inst.proc
             if proc is None or proc.poll() is not None:
                 return False
+            uptime = time.monotonic() - inst.started_at
             self._terminate(proc, timeout)
             inst.last_exit = proc.returncode
+        if _emit:
+            self._emit("stopped", iid, actor=actor, code=proc.returncode, uptime=round(uptime, 1))
         if _audit:
             self.db.audit(actor, "stop", iid)
         log.info("Instance %s arrêtée", iid)
@@ -252,8 +287,8 @@ class InstanceManager:
         self._require(iid)
         if not self.rate.allow(iid):
             raise ManagerError(f"Trop de redémarrages pour {iid}, réessayez plus tard")
-        self.stop(iid, actor=actor, _audit=False)
-        pid = self.start(iid, actor=actor, _count_rate=False)
+        self.stop(iid, actor=actor, _audit=False, _emit=False)
+        pid = self.start(iid, actor=actor, _count_rate=False, _event="restarted")
         self.db.audit(actor, "restart", iid)
         return pid
 
@@ -311,6 +346,7 @@ class InstanceManager:
                     if (age is not None and age > self.heartbeat_timeout
                             and now - inst.started_at > self.heartbeat_timeout):
                         log.warning("Heartbeat de %s périmé (%.0fs), redémarrage", iid, age)
+                        self._emit("stale", iid, age=round(age))
                         self._terminate(inst.proc, 5)
                     else:
                         if now - inst.started_at > self.stable_after:
@@ -322,6 +358,7 @@ class InstanceManager:
                     if inst.last_exit == FATAL_EXIT_CODE:   # config/token invalide: inutile de relancer
                         inst.desired = False
                         self.db.audit("system", "fatal", f"{iid} code={inst.last_exit}")
+                        self._emit("fatal", iid, code=inst.last_exit, tail=self.log_tail(iid))
                         log.error("Instance %s a quitté avec une erreur fatale, pas de relance", iid)
                         continue
                     inst.backoff = (min(self.backoff_max, inst.backoff * 2) if inst.backoff
@@ -329,14 +366,18 @@ class InstanceManager:
                     inst.next_restart_at = now + inst.backoff
                     self.db.audit("system", "crash", f"{iid} code={inst.last_exit} retry_in={inst.backoff:.0f}s")
                     log.warning("Instance %s arrêtée (code %s), relance dans %.0fs", iid, inst.last_exit, inst.backoff)
+                    self._emit("crashed", iid, code=inst.last_exit, retry_in=round(inst.backoff),
+                               uptime=round(now - inst.started_at, 1), tail=self.log_tail(iid))
                 if now >= inst.next_restart_at:
                     try:
-                        self.start(iid, actor="system", _count_rate=False)
                         inst.restarts += 1
+                        self.start(iid, actor="system", _count_rate=False, _event="relaunched")
                         relaunched.append(iid)
                     except ManagerError as exc:
+                        inst.restarts -= 1
                         log.error("Relance de %s impossible: %s", iid, exc)
                         inst.desired = False
+                        self._emit("fatal", iid, code=None, tail=str(exc))
         return relaunched
 
     async def run_monitor(self, interval: float = 2.0) -> None:
